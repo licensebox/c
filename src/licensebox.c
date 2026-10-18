@@ -848,7 +848,12 @@ static lb_result post(lb_client *c, const char *path, J *request, long timeout,
   curl_easy_setopt(curl, CURLOPT_XFERINFODATA, c);
   CURLcode result = curl_easy_perform(curl);
   curl_easy_getinfo(curl, CURLINFO_RESPONSE_CODE, &c->status);
-  if (result != CURLE_OK) {
+  /* A response-header refusal remains authoritative even if its body stalls,
+   * is truncated or exceeds our bound. Never turn known 3xx/4xx into an
+   * eligible offline transport failure. A valid received policy body is still
+   * parsed below so existing refusal persistence remains intact. */
+  if (result != CURLE_OK &&
+      (c->status < 300 || c->status >= 500 || cancelled(c))) {
     r = fail(c,
              cancelled(c) ? LB_CANCELLED
              : b.overflow ? LB_PROTOCOL_ERROR

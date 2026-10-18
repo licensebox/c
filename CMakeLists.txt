@@ -1,5 +1,5 @@
 cmake_minimum_required(VERSION 3.20)
-project(licensebox VERSION 0.3.0 LANGUAGES C)
+project(licensebox VERSION 0.4.0 LANGUAGES C)
 include(GNUInstallDirs)
 include(CTest)
 find_package(OpenSSL 3.0 REQUIRED COMPONENTS Crypto)

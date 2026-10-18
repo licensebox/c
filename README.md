@@ -81,6 +81,8 @@ Administration stays in the [Go CLI](https://github.com/licensebox/go).
 
 MIT. Copyright © 2026 [Vijai Kumar](https://meshing.engineer).
 
+Version 0.4.0 adds the explicit heartbeat API and optional signed contact policy.
+
 ## Optional protected-work checkpoints
 
 `lb_heartbeat(client, "export", &json)` always attempts a signed renewal with a
