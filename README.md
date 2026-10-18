@@ -18,6 +18,15 @@ cmake --install build --prefix /your/install/prefix
 Consumers use `find_package(licensebox CONFIG REQUIRED)` and link
 `licensebox::c`. Static and shared builds are supported (`BUILD_SHARED_LIBS`).
 
+For language bindings, build with `-DBUILD_SHARED_LIBS=ON`. Version 0.2.0 adds
+`licensebox_json.h`: a small JSON interface over the same client operations,
+plus borrowed callbacks for sign-in, cancellation and trusted platform/test
+integration. Config JSON never accepts machine-identity or clock overrides.
+Bindings must retain callbacks until client destruction and serialize an
+operation with reading its error. All successful outputs are JSON strings owned
+by the caller, released with `lb_free`; `access-link` returns a JSON string value.
+The original typed C API and ABI remain available.
+
 ```c
 #include <licensebox.h>
 #include <stdio.h>

@@ -1,0 +1,29 @@
+name: JSON FFI
+on:
+  push:
+  pull_request:
+  workflow_dispatch:
+permissions:
+  contents: read
+jobs:
+  linux:
+    runs-on: ubuntu-24.04
+    steps:
+      - uses: actions/checkout@v4
+        with:
+          persist-credentials: false
+      - uses: actions/checkout@v4
+        with:
+          repository: licensebox/protocol
+          ref: 8407d8fe2c44f220ba369fdd802a69d5a8cc4e0b
+          path: .protocol
+          persist-credentials: false
+      - uses: actions/setup-python@v5
+        with:
+          python-version: '3.12'
+      - run: python3 -m pip install 'cryptography>=43'
+      - run: sudo apt-get update && sudo apt-get install -y libssl-dev libcurl4-openssl-dev libjson-c-dev
+      - run: cmake -S . -B build -DCMAKE_BUILD_TYPE=Debug -DBUILD_SHARED_LIBS=ON -DCMAKE_C_FLAGS="-fsanitize=address,undefined -fno-omit-frame-pointer" -DCMAKE_EXE_LINKER_FLAGS="-fsanitize=address,undefined" -DCMAKE_SHARED_LINKER_FLAGS="-fsanitize=address,undefined"
+      - run: cmake --build build -j 2
+      - run: ctest --test-dir build --output-on-failure
+      - run: python3 .protocol/conformance/run.py --adapter ./build/licensebox-json-adapter
