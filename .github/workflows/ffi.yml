@@ -15,7 +15,7 @@ jobs:
       - uses: actions/checkout@v4
         with:
           repository: licensebox/protocol
-          ref: 8407d8fe2c44f220ba369fdd802a69d5a8cc4e0b
+          ref: 2d054a93a22933bac675549fb07595c9fff11912
           path: .protocol
           persist-credentials: false
       - uses: actions/setup-python@v5
@@ -27,3 +27,4 @@ jobs:
       - run: cmake --build build -j 2
       - run: ctest --test-dir build --output-on-failure
       - run: python3 .protocol/conformance/run.py --adapter ./build/licensebox-json-adapter
+      - run: python3 .protocol/conformance/tls_transport.py --adapter ./build/licensebox-json-adapter

@@ -25,7 +25,11 @@ integration. Config JSON never accepts machine-identity or clock overrides.
 Bindings must retain callbacks until client destruction and serialize an
 operation with reading its error. All successful outputs are JSON strings owned
 by the caller, released with `lb_free`; `access-link` returns a JSON string value.
-The original typed C API and ABI remain available.
+The original typed C API and ABI remain available. Version 0.3.0 adds the optional
+`ca_bundle` JSON configuration field and `lb_client_set_ca_bundle` for an
+explicit CA certificate PEM file. Use this when the linked TLS library lacks a
+default trust store. Peer and hostname verification remain enabled; passing
+`NULL` to the setter restores the library default.
 
 ```c
 #include <licensebox.h>

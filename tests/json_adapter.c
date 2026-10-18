@@ -62,6 +62,9 @@ int main(void) {
     for (size_t i = 0; i < 4; i++)
       json_object_object_add(options, fields[i],
                              json_object_get(get(o, fields[i])));
+    if (get(o, "ca_bundle"))
+      json_object_object_add(options, "ca_bundle",
+                             json_object_get(get(o, "ca_bundle")));
     json_object_object_add(options, "version",
                            json_object_new_string("conformance"));
     lb_callbacks cb = {.context = o,

@@ -5,7 +5,8 @@
 extern "C" {
 #endif
 /* Small FFI surface over the typed C API. JSON options contain product, keys
- * (id -> public key), version, server and directory only. Identity/clock
+ * (id -> public key), version, server, directory and optional ca_bundle.
+ * Identity/clock
  * overrides are trusted callbacks, never JSON options or end-user input.
  * Borrowed callbacks/context must remain alive until lb_client_destroy. */
 typedef struct {

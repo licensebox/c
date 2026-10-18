@@ -14,6 +14,7 @@ int main(void) {
   const char *invalid[] = {
       "",
       "[]",
+      "{\"product\":\"demo\",\"keys\":{},\"ca_bundle\":\"\"}",
       "null",
       "{} trailing",
       "{\"product\":\"demo\",\"keys\":{},\"machine_binding\":\"fake\"}",
@@ -27,6 +28,9 @@ int main(void) {
                               "\"A6EHv_POEL4dcN0Y50vAmWfk1jCbpQ1fHdyGZBJVMbg\"}"
                               ",\"server\":\"http://127.0.0.1:1\"}",
                               NULL, &c) == LB_OK);
+  CHECK(lb_client_set_ca_bundle(c, "") == LB_INVALID_ARGUMENT);
+  CHECK(lb_client_set_ca_bundle(c, "/synthetic/ca.pem") == LB_OK);
+  CHECK(lb_client_set_ca_bundle(c, NULL) == LB_OK);
   const char *operations[] = {"lease",   "require", "request", "record",
                               "sign_in", "sign_in", "unknown"};
   const char *args[] = {

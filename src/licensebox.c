@@ -25,7 +25,7 @@
 #define BINDING_CAP 128
 typedef struct json_object J;
 struct lb_client {
-  char *product, *version, *server, *directory;
+  char *product, *version, *server, *directory, *ca_bundle;
   lb_public_key *keys;
   size_t key_count;
   lb_config callbacks;
@@ -815,6 +815,8 @@ static lb_result post(lb_client *c, const char *path, J *request, long timeout,
   curl_easy_setopt(curl, CURLOPT_PROTOCOLS_STR, "http,https");
   curl_easy_setopt(curl, CURLOPT_SSL_VERIFYPEER, 1L);
   curl_easy_setopt(curl, CURLOPT_SSL_VERIFYHOST, 2L);
+  if (c->ca_bundle)
+    curl_easy_setopt(curl, CURLOPT_CAINFO, c->ca_bundle);
   curl_easy_setopt(curl, CURLOPT_NOPROGRESS, 0L);
   curl_easy_setopt(curl, CURLOPT_XFERINFOFUNCTION, progress);
   curl_easy_setopt(curl, CURLOPT_XFERINFODATA, c);
@@ -1366,8 +1368,25 @@ void lb_client_destroy(lb_client *c) {
   free(c->version);
   free(c->server);
   free(c->directory);
+  free(c->ca_bundle);
   pthread_mutex_destroy(&c->mutex);
   free(c);
+}
+lb_result lb_client_set_ca_bundle(lb_client *c, const char *path) {
+  if (!c || (path && !*path))
+    return LB_INVALID_ARGUMENT;
+  pthread_mutex_lock(&c->mutex);
+  reset(c);
+  char *copy = path ? strdup(path) : NULL;
+  lb_result result = LB_OK;
+  if (path && !copy)
+    result = fail(c, LB_IO_ERROR, NULL, NULL);
+  else {
+    free(c->ca_bundle);
+    c->ca_bundle = copy;
+  }
+  pthread_mutex_unlock(&c->mutex);
+  return result;
 }
 lb_result lb_lease(lb_client *c, char **out) {
   if (!c || !out)

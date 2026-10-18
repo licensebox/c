@@ -69,7 +69,8 @@ lb_result lb_client_create_json(const char *options, const lb_callbacks *cb,
     if (!strcmp(key, "keys"))
       continue;
     if ((strcmp(key, "product") && strcmp(key, "version") &&
-         strcmp(key, "server") && strcmp(key, "directory")) ||
+         strcmp(key, "server") && strcmp(key, "directory") &&
+         strcmp(key, "ca_bundle")) ||
         !str(value))
       valid = 0;
   }
@@ -89,6 +90,13 @@ lb_result lb_client_create_json(const char *options, const lb_callbacks *cb,
       cfg.cancelled = cb->cancelled;
     }
     result = lb_client_create(&cfg, out);
+    if (result == LB_OK && get(o, "ca_bundle")) {
+      result = lb_client_set_ca_bundle(*out, str(get(o, "ca_bundle")));
+      if (result != LB_OK) {
+        lb_client_destroy(*out);
+        *out = NULL;
+      }
+    }
   }
   json_object_put(o);
   return result;

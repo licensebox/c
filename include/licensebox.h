@@ -57,6 +57,9 @@ typedef struct {
  * header. */
 lb_result lb_client_create(const lb_config *, lb_client **output);
 void lb_client_destroy(lb_client *);
+/* Optional CA certificate PEM file. Set before protected use. NULL restores
+ * libcurl defaults; peer and hostname verification are always enabled. */
+lb_result lb_client_set_ca_bundle(lb_client *, const char *path);
 const char *lb_error_code(const lb_client *);
 const char *lb_error_message(const lb_client *);
 const char *lb_result_code(lb_result);
