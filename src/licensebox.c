@@ -645,7 +645,9 @@ static lb_result install_key(lb_client *c, EVP_PKEY **output) {
   if (!path)
     return fail(c, LB_IO_ERROR, NULL, NULL);
   for (int i = 0; i < 40; i++) {
+    errno = 0;
     char *saved = read_state(c, "install.key");
+    int missing = !saved && errno == ENOENT;
     size_t n = 0;
     unsigned char *seed = saved ? dec(saved, &n) : NULL;
     free(saved);
@@ -659,7 +661,7 @@ static lb_result install_key(lb_client *c, EVP_PKEY **output) {
     free(seed);
     if (c->existing_key_only) {
       free(path);
-      return fail(c, LB_IO_ERROR, NULL,
+      return fail(c, missing ? LB_NOT_SIGNED_IN : LB_IO_ERROR, NULL,
                   "heartbeat needs an intact existing installation key");
     }
     int fd = open(path, O_WRONLY | O_CREAT | O_EXCL, 0600);
