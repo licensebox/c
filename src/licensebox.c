@@ -33,6 +33,7 @@ struct lb_client {
   J *checked;
   pthread_mutex_t mutex;
   long status;
+  int existing_key_only; /* heartbeat never creates/rotates an identity */
   lb_result result;
   char code[80], detail[512];
 };
@@ -458,6 +459,24 @@ static lb_result verify_internal(const char *token, const char *product,
     r = LB_MALFORMED;
     goto done;
   }
+  J *heartbeat = get(o, "heartbeat");
+  if (heartbeat && !json_object_is_type(heartbeat, json_type_null)) {
+    J *interval = get(heartbeat, "interval_seconds"),
+      *grace = get(heartbeat, "grace_seconds");
+    double issued = 0;
+    if (!json_object_is_type(heartbeat, json_type_object) ||
+        !json_object_is_type(interval, json_type_int) ||
+        !json_object_is_type(grace, json_type_int) ||
+        json_object_get_int64(interval) < 30 ||
+        json_object_get_int64(interval) > 86400 ||
+        json_object_get_int64(grace) < json_object_get_int64(interval) ||
+        json_object_get_int64(grace) > 31536000 ||
+        !timestamp(field(o, "issued"), &issued) ||
+        until > issued + (double)json_object_get_int64(grace)) {
+      r = LB_MALFORMED;
+      goto done;
+    }
+  }
   if (!expired && now >= until) {
     r = LB_EXPIRED;
     goto done;
@@ -638,6 +657,11 @@ static lb_result install_key(lb_client *c, EVP_PKEY **output) {
       return *output ? LB_OK : fail(c, LB_PROTOCOL_ERROR, NULL, NULL);
     }
     free(seed);
+    if (c->existing_key_only) {
+      free(path);
+      return fail(c, LB_IO_ERROR, NULL,
+                  "heartbeat needs an intact existing installation key");
+    }
     int fd = open(path, O_WRONLY | O_CREAT | O_EXCL, 0600);
     if (fd < 0) {
       if (errno == EEXIST) {
@@ -1427,6 +1451,94 @@ lb_result lb_require(lb_client *c, const char *module, char **out) {
   if (r == LB_OK)
     r = output_json(c, o, out);
   json_object_put(o);
+  pthread_mutex_unlock(&c->mutex);
+  return r;
+}
+lb_result lb_heartbeat(lb_client *c, const char *module, char **out) {
+  if (!out)
+    return LB_INVALID_ARGUMENT;
+  *out = NULL;
+  if (!c || !module || !*module)
+    return LB_INVALID_ARGUMENT;
+  pthread_mutex_lock(&c->mutex);
+  reset(c);
+  /* Any failed forced check must not leave an earlier Require success cached. */
+  json_object_put(c->checked);
+  c->checked = NULL;
+  c->existing_key_only = 1;
+  J *kept = NULL, *fresh = NULL, *result = NULL;
+  char *token = NULL;
+  double now = 0, expires = 0;
+  int online = 0;
+  errno = 0;
+  token = read_state(c, "lease");
+  lb_result r = LB_OK;
+  if (!token) {
+    r = fail(c, errno == ENOENT ? LB_NOT_SIGNED_IN : LB_IO_ERROR, NULL,
+             "heartbeat requires a saved lease; explicitly sign in first");
+    goto done;
+  }
+  r = binding(c);
+  if (r == LB_OK)
+    r = now_seen(c, &now);
+  if (r == LB_OK) {
+    r = verify_internal(token, c->product, c->keys, c->key_count, now, 1, &kept);
+    if (r != LB_OK)
+      fail(c, r, NULL, "saved heartbeat lease is invalid");
+  }
+  if (r == LB_OK)
+    r = own(c, kept);
+  if (r != LB_OK)
+    goto done;
+  r = renew(c, &fresh); /* signed renew, fixed 3000 ms, never activation */
+  if (r == LB_OK) {
+    online = 1;
+    json_object_put(c->checked);
+    c->checked = json_object_get(fresh); /* publish changed grants first */
+  } else {
+    if (policy_code(c->code) != LB_OK || r == LB_REVOKED ||
+        !strcmp(c->code, "terms_changed") || !strcmp(c->code, "invalid_lease") ||
+        !strcmp(c->code, "denied") || (c->status >= 300 && c->status < 500))
+      goto done;
+    if (r != LB_NETWORK_ERROR && c->status < 500)
+      goto done;
+    lb_result saved = denial(c);
+    if (saved != LB_OK) {
+      r = saved;
+      goto done;
+    }
+    /* Network time cannot extend the last verified signed deadline. */
+    r = now_seen(c, &now);
+    if (r != LB_OK)
+      goto done;
+    timestamp(field(kept, "expires"), &expires);
+    if (now >= expires) {
+      r = fail(c, LB_OFFLINE, NULL, "the saved lease expired; connect to renew");
+      goto done;
+    }
+    fresh = json_object_get(kept);
+    reset(c);
+    r = LB_OK;
+  }
+  if (!has_module(fresh, module)) {
+    r = fail(c, LB_MODULE_DENIED, NULL,
+             "the requested module is not licensed to this user");
+    goto done;
+  }
+  result = json_object_new_object();
+  if (!result) {
+    r = fail(c, LB_IO_ERROR, NULL, NULL);
+    goto done;
+  }
+  json_object_object_add(result, "lease", json_object_get(fresh));
+  json_object_object_add(result, "online", json_object_new_boolean(online));
+  r = output_json(c, result, out);
+ done:
+  free(token);
+  json_object_put(kept);
+  json_object_put(fresh);
+  json_object_put(result);
+  c->existing_key_only = 0;
   pthread_mutex_unlock(&c->mutex);
   return r;
 }

@@ -18,7 +18,7 @@ typedef struct {
 } lb_callbacks;
 lb_result lb_client_create_json(const char *options_json, const lb_callbacks *,
                                 lb_client **output);
-/* Operations: lease, require {module}, status, sign_in {timeout}, logout,
+/* Operations: lease, require {module}, heartbeat {module}, status, sign_in {timeout}, logout,
  * modules, requests, request {modules:[],note}, access-link,
  * record {command,success,elapsed}. Always returns caller-owned JSON on
  * success, including a JSON string for access-link and null for record/logout.

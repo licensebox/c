@@ -66,6 +66,11 @@ const char *lb_result_code(lb_result);
 void lb_free(void *);
 lb_result lb_lease(lb_client *, char **lease_json);
 lb_result lb_require(lb_client *, const char *module, char **lease_json);
+/* Explicit checkpoint: always signed renew (3s), no activation/key rotation.
+ * Requires a nonempty module and saved verified identity. Returns JSON
+ * {"lease":<verified lease>,"online":true|false}; offline only before expires.
+ * Consumer owns scheduling/cancellation; no background thread is started. */
+lb_result lb_heartbeat(lb_client *, const char *module, char **heartbeat_json);
 lb_result lb_status(lb_client *, char **lease_json); /* local only */
 lb_result lb_sign_in(lb_client *, double timeout_seconds, char **lease_json);
 lb_result lb_logout(lb_client *); /* installation key is retained */

@@ -46,6 +46,15 @@ int main(void) {
           LB_INVALID_ARGUMENT);
     CHECK(out == NULL);
   }
+  const char *heartbeat_args[] = {"{}", "{\"module\":\"\"}",
+                                   "{\"module\":true}",
+                                   "{\"module\":\"core\\u0000other\"}"};
+  for (size_t i = 0; i < sizeof(heartbeat_args)/sizeof(*heartbeat_args); i++) {
+    CHECK(lb_client_call_json(c, "heartbeat", heartbeat_args[i], &out) == LB_INVALID_ARGUMENT);
+    CHECK(out == NULL);
+  }
+  CHECK(lb_heartbeat(c, "", &out) == LB_INVALID_ARGUMENT);
+  CHECK(out == NULL);
   lb_client_destroy(c);
   puts("PASS: malformed FFI inputs and identity override options rejected "
        "before network access");

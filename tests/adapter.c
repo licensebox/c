@@ -80,7 +80,19 @@ int main(void) {
       else if (!strcmp(op, "require"))
         r = lb_require(client, *s(o, "module") ? s(o, "module") : "core",
                        &output);
-      else if (!strcmp(op, "repeat")) {
+      else if (!strcmp(op, "heartbeat") || !strcmp(op, "heartbeat-repeat") ||
+               !strcmp(op, "heartbeat-after-require")) {
+        if (!strcmp(op, "heartbeat-after-require")) {
+          r = lb_require(client, "core", &output);
+          lb_free(output); output = NULL;
+        }
+        if (r == LB_OK)
+          r = lb_heartbeat(client, *s(o, "module") ? s(o, "module") : "core", &output);
+        if (r == LB_OK && !strcmp(op, "heartbeat-repeat")) {
+          lb_free(output); output = NULL;
+          r = lb_heartbeat(client, *s(o, "module") ? s(o, "module") : "core", &output);
+        }
+      } else if (!strcmp(op, "repeat")) {
         r = lb_require(client, "core", &output);
         lb_free(output);
         output = NULL;

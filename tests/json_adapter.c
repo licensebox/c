@@ -76,8 +76,10 @@ int main(void) {
     if (r == LB_OK) {
       const char *operation = op;
       J *args = json_object_new_object();
-      if (!strcmp(op, "require") || !strcmp(op, "repeat")) {
-        operation = "require";
+      if (!strcmp(op, "require") || !strcmp(op, "repeat") ||
+          !strcmp(op, "heartbeat") || !strcmp(op, "heartbeat-repeat") ||
+          !strcmp(op, "heartbeat-after-require")) {
+        operation = !strncmp(op, "heartbeat", 9) ? "heartbeat" : "require";
         json_object_object_add(
             args, "module",
             json_object_new_string(*s(o, "module") ? s(o, "module") : "core"));
@@ -95,8 +97,13 @@ int main(void) {
         json_object_object_add(args, "success", json_object_new_boolean(1));
         json_object_object_add(args, "elapsed", json_object_new_double(.125));
       }
-      r = lb_client_call_json(c, operation, json(args), &out);
-      if (r == LB_OK && (!strcmp(op, "repeat") || !strcmp(op, "record"))) {
+      if (!strcmp(op, "heartbeat-after-require")) {
+        r = lb_client_call_json(c, "require", json(args), &out);
+        lb_free(out); out = NULL;
+      }
+      if (r == LB_OK)
+        r = lb_client_call_json(c, operation, json(args), &out);
+      if (r == LB_OK && (!strcmp(op, "repeat") || !strcmp(op, "heartbeat-repeat") || !strcmp(op, "record"))) {
         lb_free(out);
         out = NULL;
         if (!strcmp(op, "record")) {

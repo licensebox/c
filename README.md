@@ -69,7 +69,7 @@ folder is compatible with other Licensebox SDKs.
 
 Machine/seat/location refusals stop access and persist offline. `LB_OFFLINE`
 means an expired lease could not renew; `LB_MODULE_DENIED` means missing access;
-`LB_REVOKED` removes cached access state. No background heartbeat is provided.
+`LB_REVOKED` removes cached access state. No background work starts automatically.
 Raw native IDs remain local. Software recognition is not hardware attestation;
 cloned/spoofed IDs or modified host software remain limitations. Any payments or
 billing are handled separately by product administrators.
@@ -80,3 +80,32 @@ against the same scenarios as Go, Python and TypeScript. Crypto uses
 Administration stays in the [Go CLI](https://github.com/licensebox/go).
 
 MIT. Copyright © 2026 [Vijai Kumar](https://meshing.engineer).
+
+## Optional protected-work checkpoints
+
+`lb_heartbeat(client, "export", &json)` always attempts a signed renewal with a
+three-second network bound, even after `lb_require` succeeded on the same
+client. It returns caller-owned JSON `{"lease":{...},"online":true|false}`.
+A verified unexpired saved lease may authorize offline work with `online=false`;
+its signed `expires` is never extended by a failed check. Missing state returns
+`not_signed_in`; invalid state, missing modules and explicit policy refusals fail
+closed. Heartbeat never opens sign-in, creates/rotates a key or transfers seats.
+
+```c
+/* Invoke from the application's own event loop or batch checkpoint. */
+int checkpoint(lb_client *client) {
+    char *state = NULL;
+    lb_result result = lb_heartbeat(client, "export", &state);
+    lb_free(state);
+    return result == LB_OK; /* caller pauses protected work safely on failure */
+}
+```
+
+The optional signed lease `heartbeat` object contains integer `interval_seconds`
+and `grace_seconds`. Missing/null means legacy scheduling; valid enabled policy
+is checked when verifying every lease. Consumers choose scheduling and safe
+shutdown. Use the server interval when present; independently stop protected work
+at the last verified expiry even if renewal is slow. No failed check may move
+that deadline. This SDK starts no worker thread and never exits the application;
+callbacks retain their existing thread and non-reentry requirements. The JSON
+ABI exposes `heartbeat` with `{"module":"export"}` and the same result/lifetime.

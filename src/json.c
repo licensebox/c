@@ -131,6 +131,9 @@ lb_result lb_client_call_json(lb_client *c, const char *op,
     r = lb_status(c, out);
   else if (!strcmp(op, "require") && str(get(o, "module")))
     r = lb_require(c, str(get(o, "module")), out);
+  else if (!strcmp(op, "heartbeat") && str(get(o, "module")) &&
+           *str(get(o, "module")))
+    r = lb_heartbeat(c, str(get(o, "module")), out);
   else if (!strcmp(op, "sign_in")) {
     J *timeout = get(o, "timeout");
     if (!timeout || json_object_get_type(timeout) == json_type_double ||
