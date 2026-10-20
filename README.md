@@ -5,7 +5,9 @@ three-second silent renewal and verified offline access. Linux is the supported
 and runtime-validated platform for this first release. Other OS adapters are
 pending; no random machine identifier is used as a fallback.
 
-Dependencies: C11, CMake 3.20+, OpenSSL 3+, libcurl 7.85+, json-c and pthreads.
+Dependencies: C11, CMake 3.20+, OpenSSL 3.5+ (the first with ML-DSA), libcurl
+7.85+, json-c and pthreads. Ubuntu 26.04, Debian 13 and Fedora 42 ship OpenSSL
+3.5; on older systems build against a newer OpenSSL (`-DOPENSSL_ROOT_DIR=...`).
 For an Ubuntu development environment:
 
 ```sh
@@ -75,8 +77,13 @@ cloned/spoofed IDs or modified host software remain limitations. Any payments or
 billing are handled separately by product administrators.
 
 The [shared contract](https://github.com/licensebox/protocol) tests this client
-against the same scenarios as Go, Python and TypeScript. Crypto uses
-[OpenSSL's Ed25519 implementation](https://docs.openssl.org/3.4/man7/EVP_SIGNATURE-ED25519/).
+against the same scenarios as Go, Python and TypeScript. Crypto uses OpenSSL's
+[Ed25519](https://docs.openssl.org/3.5/man7/EVP_SIGNATURE-ED25519/) and
+[ML-DSA-65](https://docs.openssl.org/3.5/man7/EVP_SIGNATURE-ML-DSA/).
+
+Version 0.5.0 speaks protocol v3: every licence and request is signed with
+Ed25519 and ML-DSA-65 together, and both must verify. Trusted keys are written
+`ed25519-mldsa65:<base64url>`, about 2.7 KB, so keep them in a file or constant.
 Administration stays in the [Go CLI](https://github.com/licensebox/go).
 
 MIT. Copyright © 2026 [Vijai Kumar](https://meshing.engineer).

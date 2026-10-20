@@ -6,9 +6,11 @@
 #include <fcntl.h>
 #include <json-c/json.h>
 #include <math.h>
+#include <openssl/core_names.h>
 #include <openssl/crypto.h>
 #include <openssl/evp.h>
 #include <openssl/hmac.h>
+#include <openssl/params.h>
 #include <openssl/rand.h>
 #include <pthread.h>
 #include <stdarg.h>
@@ -104,19 +106,70 @@ static char *format(const char *f, ...) {
   va_end(a);
   return s;
 }
+/* json-c 0.18's strict mode refuses every raw non-ASCII byte, even valid UTF-8
+   in a string, so valid UTF-8 is first written as \u escapes, which mean the
+   same. The byte after a backslash is copied as it is, so that JSON which was
+   invalid stays invalid. Returns NULL for invalid UTF-8. */
+static char *ascii_json(const char *text) {
+  size_t n = strlen(text), o = 0;
+  char *out = malloc(n * 3 + 1);
+  for (size_t i = 0; out && i < n;) {
+    const unsigned char *u = (const unsigned char *)text + i;
+    if (u[0] == '\\' && i + 1 < n) {
+      out[o++] = (char)u[0];
+      out[o++] = (char)u[1];
+      i += 2;
+      continue;
+    }
+    if (u[0] < 0x80) {
+      out[o++] = (char)u[0];
+      i++;
+      continue;
+    }
+    size_t len = u[0] >= 0xf0 && u[0] <= 0xf4   ? 4
+                 : u[0] >= 0xe0 && u[0] <= 0xef ? 3
+                 : u[0] >= 0xc2 && u[0] <= 0xdf ? 2
+                                                : 0;
+    unsigned long cp = len == 4 ? u[0] & 7u : len == 3 ? u[0] & 15u : u[0] & 31u;
+    for (size_t k = 1; len && k < len; k++) {
+      if (i + k >= n || (u[k] & 0xc0) != 0x80)
+        len = 0;
+      else
+        cp = cp << 6 | (u[k] & 0x3fu);
+    }
+    if (!len || (len == 3 && cp < 0x800) || (len == 4 && cp < 0x10000) ||
+        cp > 0x10ffff || (cp >= 0xd800 && cp <= 0xdfff)) {
+      free(out);
+      return NULL;
+    }
+    if (cp >= 0x10000) {
+      cp -= 0x10000;
+      o += (size_t)sprintf(out + o, "\\u%04lx\\u%04lx", 0xd800 + (cp >> 10),
+                           0xdc00 + (cp & 0x3ff));
+    } else
+      o += (size_t)sprintf(out + o, "\\u%04lx", cp);
+    i += len;
+  }
+  if (out)
+    out[o] = 0;
+  return out;
+}
 static J *parse(const char *text) {
   if (!text || strlen(text) > LIMIT)
     return NULL;
-  struct json_tokener *t = json_tokener_new();
-  if (!t)
-    return NULL;
-  json_tokener_set_flags(t, JSON_TOKENER_STRICT | JSON_TOKENER_VALIDATE_UTF8);
-  J *o = json_tokener_parse_ex(t, text, (int)strlen(text) + 1);
-  if (json_tokener_get_error(t) != json_tokener_success) {
-    json_object_put(o);
-    o = NULL;
+  char *ascii = ascii_json(text);
+  struct json_tokener *t = ascii ? json_tokener_new() : NULL;
+  J *o = NULL;
+  if (t) {
+    json_tokener_set_flags(t, JSON_TOKENER_STRICT);
+    o = json_tokener_parse_ex(t, ascii, (int)strlen(ascii) + 1);
+    if (json_tokener_get_error(t) != json_tokener_success) {
+      json_object_put(o);
+      o = NULL;
+    }
+    json_tokener_free(t);
   }
-  json_tokener_free(t);
+  free(ascii);
   return o;
 }
 static char *enc(const unsigned char *bytes, size_t size) {
@@ -358,6 +411,84 @@ static void stamp(double seconds, char output[40]) {
   gmtime_r(&t, &value);
   strftime(output, 40, "%Y-%m-%dT%H:%M:%SZ", &value);
 }
+/* Protocol v3 signs everything with Ed25519 and ML-DSA-65 (FIPS 204) over the
+   same message; both must verify. Keys are written "<alg>:<base64url>", the
+   Ed25519 part first. The algorithm always comes from the trusted key. */
+#define ALGORITHM "ed25519-mldsa65"
+enum { ED_PUBLIC = 32, ML_PUBLIC = 1952, ED_SIG = 64, ML_SIG = 3309, SEED = 64 };
+typedef struct {
+  EVP_PKEY *ed, *ml;
+} hybrid;
+static void hybrid_free(hybrid *k) {
+  if (k) {
+    EVP_PKEY_free(k->ed);
+    EVP_PKEY_free(k->ml);
+    free(k);
+  }
+}
+static EVP_PKEY *mldsa_from_seed(const unsigned char *seed) {
+  EVP_PKEY_CTX *ctx = EVP_PKEY_CTX_new_from_name(NULL, "ML-DSA-65", NULL);
+  EVP_PKEY *ml = NULL;
+  OSSL_PARAM params[] = {OSSL_PARAM_construct_octet_string(
+                             OSSL_PKEY_PARAM_ML_DSA_SEED, (void *)seed, 32),
+                         OSSL_PARAM_construct_end()};
+  if (!ctx || EVP_PKEY_fromdata_init(ctx) != 1 ||
+      EVP_PKEY_fromdata(ctx, &ml, EVP_PKEY_KEYPAIR, params) != 1) {
+    EVP_PKEY_free(ml);
+    ml = NULL;
+  }
+  EVP_PKEY_CTX_free(ctx);
+  return ml;
+}
+static hybrid *hybrid_from_seed(const unsigned char *seed) {
+  hybrid *k = calloc(1, sizeof *k);
+  if (!k)
+    return NULL;
+  k->ed = EVP_PKEY_new_raw_private_key(EVP_PKEY_ED25519, NULL, seed, 32);
+  k->ml = mldsa_from_seed(seed + 32);
+  if (!k->ed || !k->ml) {
+    hybrid_free(k);
+    return NULL;
+  }
+  return k;
+}
+/* The base64url part of a key written with this algorithm, or NULL. */
+static const char *key_data(const char *text) {
+  size_t n = strlen(ALGORITHM);
+  return text && !strncmp(text, ALGORITHM ":", n + 1) ? text + n + 1 : NULL;
+}
+/* Reads a trusted or installation public key; anything but a whole hybrid
+   key is malformed, never read as Ed25519 alone. */
+static hybrid *public_hybrid(const char *text) {
+  size_t n = 0;
+  unsigned char *raw = key_data(text) ? dec(key_data(text), &n) : NULL;
+  hybrid *k = raw && n == ED_PUBLIC + ML_PUBLIC ? calloc(1, sizeof *k) : NULL;
+  if (k) {
+    k->ed = EVP_PKEY_new_raw_public_key(EVP_PKEY_ED25519, NULL, raw, ED_PUBLIC);
+    k->ml = EVP_PKEY_new_raw_public_key_ex(NULL, "ML-DSA-65", NULL,
+                                           raw + ED_PUBLIC, ML_PUBLIC);
+    if (!k->ed || !k->ml) {
+      hybrid_free(k);
+      k = NULL;
+    }
+  }
+  free(raw);
+  return k;
+}
+static int verify_one(EVP_PKEY *key, const unsigned char *sig, size_t sn,
+                      const unsigned char *message, size_t mn) {
+  EVP_MD_CTX *ctx = EVP_MD_CTX_new();
+  int valid = ctx && EVP_DigestVerifyInit(ctx, NULL, NULL, NULL, key) == 1 &&
+              EVP_DigestVerify(ctx, sig, sn, message, mn) == 1;
+  EVP_MD_CTX_free(ctx);
+  return valid;
+}
+static int hybrid_verify(hybrid *key, const unsigned char *sig, size_t sn,
+                         const unsigned char *message, size_t mn) {
+  return sn == ED_SIG + ML_SIG &&
+         verify_one(key->ed, sig, ED_SIG, message, mn) &&
+         verify_one(key->ml, sig + ED_SIG, ML_SIG, message, mn);
+}
 static lb_result verify_internal(const char *token, const char *product,
                                  const lb_public_key *keys, size_t key_count,
                                  double now, int expired, J **output) {
@@ -376,7 +507,7 @@ static lb_result verify_internal(const char *token, const char *product,
   size_t pn = 0, sn = 0;
   unsigned char *payload = dec(copy, &pn), *signature = dec(dot, &sn);
   free(copy);
-  if (!payload || !signature || sn != 64 || memchr(payload, 0, pn)) {
+  if (!payload || !signature || !sn || memchr(payload, 0, pn)) {
     free(payload);
     free(signature);
     return LB_MALFORMED;
@@ -387,7 +518,7 @@ static lb_result verify_internal(const char *token, const char *product,
     r = LB_MALFORMED;
     goto done;
   }
-  if (json_object_get_int(get(o, "v")) != 2) {
+  if (json_object_get_int(get(o, "v")) != 3) {
     r = LB_VERSION;
     goto done;
   }
@@ -401,31 +532,23 @@ static lb_result verify_internal(const char *token, const char *product,
     r = LB_UNKNOWN_KEY;
     goto done;
   }
-  size_t kn = 0;
-  unsigned char *kb = dec(public, &kn);
-  if (!kb || kn != 32) {
-    free(kb);
+  hybrid *key = public_hybrid(public);
+  if (!key) {
     r = LB_MALFORMED;
     goto done;
   }
-  EVP_PKEY *key = EVP_PKEY_new_raw_public_key(EVP_PKEY_ED25519, NULL, kb, kn);
-  free(kb);
-  EVP_MD_CTX *ctx = EVP_MD_CTX_new();
-  size_t prefix = strlen("licensebox lease v2\n");
+  const char *domain = "licensebox lease v3\n" ALGORITHM "\n";
+  size_t prefix = strlen(domain);
   unsigned char *message = malloc(prefix + pn);
-  if (!key || !ctx || !message) {
-    EVP_PKEY_free(key);
-    EVP_MD_CTX_free(ctx);
-    free(message);
+  if (!message) {
+    hybrid_free(key);
     r = LB_IO_ERROR;
     goto done;
   }
-  memcpy(message, "licensebox lease v2\n", prefix);
+  memcpy(message, domain, prefix);
   memcpy(message + prefix, payload, pn);
-  int valid = EVP_DigestVerifyInit(ctx, NULL, NULL, NULL, key) == 1 &&
-              EVP_DigestVerify(ctx, signature, sn, message, prefix + pn) == 1;
-  EVP_PKEY_free(key);
-  EVP_MD_CTX_free(ctx);
+  int valid = hybrid_verify(key, signature, sn, message, prefix + pn);
+  hybrid_free(key);
   free(message);
   if (!valid) {
     r = LB_BAD_SIGNATURE;
@@ -436,10 +559,10 @@ static lb_result verify_internal(const char *token, const char *product,
     r = LB_MALFORMED;
     goto done;
   }
-  size_t mn = 0;
-  unsigned char *machine = dec(field(o, "machine"), &mn);
-  free(machine);
-  if (mn != 32) {
+  hybrid *machine = public_hybrid(field(o, "machine"));
+  int known = machine != NULL;
+  hybrid_free(machine);
+  if (!known) {
     r = LB_MALFORMED;
     goto done;
   }
@@ -637,7 +760,7 @@ static lb_result binding(lb_client *c) {
   }
   return LB_OK;
 }
-static lb_result install_key(lb_client *c, EVP_PKEY **output) {
+static lb_result install_key(lb_client *c, hybrid **output) {
   *output = NULL;
   if (mkdirs(c) != LB_OK)
     return c->result;
@@ -649,10 +772,11 @@ static lb_result install_key(lb_client *c, EVP_PKEY **output) {
     char *saved = read_state(c, "install.key");
     int missing = !saved && errno == ENOENT;
     size_t n = 0;
-    unsigned char *seed = saved ? dec(saved, &n) : NULL;
+    const char *data = saved ? key_data(saved) : NULL;
+    unsigned char *seed = data ? dec(data, &n) : NULL;
     free(saved);
-    if (seed && n == 32) {
-      *output = EVP_PKEY_new_raw_private_key(EVP_PKEY_ED25519, NULL, seed, n);
+    if (seed && n == SEED) {
+      *output = hybrid_from_seed(seed);
       OPENSSL_cleanse(seed, n);
       free(seed);
       free(path);
@@ -672,11 +796,11 @@ static lb_result install_key(lb_client *c, EVP_PKEY **output) {
       }
       break;
     }
-    unsigned char raw[32];
-    int ok = RAND_priv_bytes(raw, 32) == 1;
-    char *text = ok ? enc(raw, 32) : NULL;
+    unsigned char raw[SEED];
+    int ok = RAND_priv_bytes(raw, SEED) == 1;
+    char *text = ok ? enc(raw, SEED) : NULL;
     if (text) {
-      char *line = format("%s\n", text);
+      char *line = format(ALGORITHM ":%s\n", text);
       if (!line)
         ok = 0;
       else {
@@ -689,7 +813,7 @@ static lb_result install_key(lb_client *c, EVP_PKEY **output) {
     if (close(fd))
       ok = 0;
     if (ok)
-      *output = EVP_PKEY_new_raw_private_key(EVP_PKEY_ED25519, NULL, raw, 32);
+      *output = hybrid_from_seed(raw);
     OPENSSL_cleanse(raw, sizeof(raw));
     if (text) {
       OPENSSL_cleanse(text, strlen(text));
@@ -706,24 +830,36 @@ static lb_result install_key(lb_client *c, EVP_PKEY **output) {
   return fail(c, LB_IO_ERROR, NULL,
               "installation key is damaged or another process is writing it");
 }
-static char *public_key(EVP_PKEY *key) {
-  unsigned char b[32];
-  size_t n = sizeof(b);
-  return EVP_PKEY_get_raw_public_key(key, b, &n) == 1 && n == 32 ? enc(b, n)
-                                                                 : NULL;
-}
-static char *signature(EVP_PKEY *key, const char *message) {
-  EVP_MD_CTX *ctx = EVP_MD_CTX_new();
-  unsigned char sig[64];
-  size_t n = sizeof(sig);
-  char *text = NULL;
-  if (ctx && message && EVP_DigestSignInit(ctx, NULL, NULL, NULL, key) == 1 &&
-      EVP_DigestSign(ctx, sig, &n, (const unsigned char *)message,
-                     strlen(message)) == 1 &&
-      n == 64)
-    text = enc(sig, n);
-  EVP_MD_CTX_free(ctx);
+static char *public_key(hybrid *key) {
+  unsigned char b[ED_PUBLIC + ML_PUBLIC];
+  size_t e = ED_PUBLIC, m = ML_PUBLIC;
+  if (EVP_PKEY_get_raw_public_key(key->ed, b, &e) != 1 || e != ED_PUBLIC ||
+      EVP_PKEY_get_raw_public_key(key->ml, b + ED_PUBLIC, &m) != 1 ||
+      m != ML_PUBLIC)
+    return NULL;
+  char *data = enc(b, sizeof b),
+       *text = data ? format(ALGORITHM ":%s", data) : NULL;
+  free(data);
   return text;
+}
+static int sign_one(EVP_PKEY *key, const char *message, unsigned char *sig,
+                    size_t size) {
+  EVP_MD_CTX *ctx = EVP_MD_CTX_new();
+  size_t n = size;
+  int ok = ctx && EVP_DigestSignInit(ctx, NULL, NULL, NULL, key) == 1 &&
+           EVP_DigestSign(ctx, sig, &n, (const unsigned char *)message,
+                          strlen(message)) == 1 &&
+           n == size;
+  EVP_MD_CTX_free(ctx);
+  return ok;
+}
+/* Pure Ed25519, and hedged ML-DSA-65 with an empty context. */
+static char *signature(hybrid *key, const char *message) {
+  unsigned char sig[ED_SIG + ML_SIG];
+  return message && sign_one(key->ed, message, sig, ED_SIG) &&
+                 sign_one(key->ml, message, sig + ED_SIG, ML_SIG)
+             ? enc(sig, sizeof sig)
+             : NULL;
 }
 static lb_result own(lb_client *c, J *lease) {
   if (binding(c) != LB_OK)
@@ -732,11 +868,11 @@ static lb_result own(lb_client *c, J *lease) {
     return fail(
         c, LB_MACHINE_CHANGED, NULL,
         "these credentials belong to another machine; explicitly sign in here");
-  EVP_PKEY *key = NULL;
+  hybrid *key = NULL;
   if (install_key(c, &key) != LB_OK)
     return c->result;
   char *public = public_key(key);
-  EVP_PKEY_free(key);
+  hybrid_free(key);
   int valid = public && !strcmp(public, field(lease, "machine"));
   free(public);
   return valid ? LB_OK
@@ -940,7 +1076,7 @@ static lb_result call(lb_client *c, const char *kind, J *payload, long timeout,
     free(token);
     return r;
   }
-  EVP_PKEY *key = NULL;
+  hybrid *key = NULL;
   if (install_key(c, &key) != LB_OK) {
     free(token);
     return c->result;
@@ -951,14 +1087,14 @@ static lb_result call(lb_client *c, const char *kind, J *payload, long timeout,
   const char *body = json(payload);
   if (!digest((const unsigned char *)body, strlen(body), sum)) {
     free(token);
-    EVP_PKEY_free(key);
+    hybrid_free(key);
     return fail(c, LB_PROTOCOL_ERROR, NULL, NULL);
   }
   hex(sum, 32, h);
-  char *message = format("licensebox %s v2\n%s\n%s\n%s\n%s", kind, token,
+  char *message = format("licensebox %s v3\n" ALGORITHM "\n%s\n%s\n%s\n%s", kind, token,
                          c->binding, at, h),
        *sig = signature(key, message), *path = format("/v1/%s", kind);
-  EVP_PKEY_free(key);
+  hybrid_free(key);
   free(message);
   if (!sig || !path) {
     free(token);
@@ -1036,11 +1172,16 @@ static lb_result renew(lb_client *c, J **out) {
   return r;
 }
 static lb_result rotate(lb_client *c) {
-  unsigned char raw[32];
-  if (RAND_priv_bytes(raw, 32) != 1)
+  unsigned char raw[SEED];
+  if (RAND_priv_bytes(raw, SEED) != 1)
     return fail(c, LB_PROTOCOL_ERROR, NULL, NULL);
-  char *seed = enc(raw, 32);
-  OPENSSL_cleanse(raw, 32);
+  char *data = enc(raw, SEED),
+       *seed = data ? format(ALGORITHM ":%s", data) : NULL;
+  OPENSSL_cleanse(raw, SEED);
+  if (data) {
+    OPENSSL_cleanse(data, strlen(data));
+    free(data);
+  }
   if (!seed)
     return fail(c, LB_IO_ERROR, NULL, NULL);
   lb_result r = write_state(c, "install.key", seed);
@@ -1077,7 +1218,7 @@ static lb_result activate(lb_client *c, int explicit, double timeout,
     }
     rotated = 1;
   }
-  EVP_PKEY *key = NULL;
+  hybrid *key = NULL;
   lb_result r = install_key(c, &key);
   if (r != LB_OK) {
     json_object_put(old);
@@ -1085,7 +1226,7 @@ static lb_result activate(lb_client *c, int explicit, double timeout,
   }
   char at[40];
   stamp(raw_now(c), at);
-  char *message = format("licensebox device v2\n%s\n%s\n%s", c->product,
+  char *message = format("licensebox device v3\n" ALGORITHM "\n%s\n%s\n%s", c->product,
                          c->binding, at),
        *sig = signature(key, message), *public = public_key(key);
   free(message);
@@ -1093,7 +1234,7 @@ static lb_result activate(lb_client *c, int explicit, double timeout,
     free(sig);
     free(public);
     json_object_put(old);
-    EVP_PKEY_free(key);
+    hybrid_free(key);
     return fail(c, LB_IO_ERROR, NULL, NULL);
   }
   struct utsname host;
@@ -1116,7 +1257,7 @@ static lb_result activate(lb_client *c, int explicit, double timeout,
   json_object_put(request);
   if (r != LB_OK) {
     json_object_put(old);
-    EVP_PKEY_free(key);
+    hybrid_free(key);
     if (explicit && !rotated && r == LB_MACHINE_CHANGED) {
       if (rotate(c) != LB_OK)
         return c->result;
@@ -1155,7 +1296,7 @@ static lb_result activate(lb_client *c, int explicit, double timeout,
     if (monotonic() >= deadline)
       break;
     stamp(raw_now(c), at);
-    message = format("licensebox token v2\n%s\n%s\n%s",
+    message = format("licensebox token v3\n" ALGORITHM "\n%s\n%s\n%s",
                      field(device, "device_code"), c->binding, at);
     sig = signature(key, message);
     free(message);
@@ -1209,7 +1350,7 @@ static lb_result activate(lb_client *c, int explicit, double timeout,
 done:
   json_object_put(device);
   json_object_put(old);
-  EVP_PKEY_free(key);
+  hybrid_free(key);
   return r;
 }
 static lb_result get_lease(lb_client *c, J **out) {
@@ -1350,10 +1491,9 @@ lb_result lb_client_create(const lb_config *cfg, lb_client **out) {
     return LB_INVALID_ARGUMENT;
   }
   for (size_t i = 0; i < cfg->key_count; i++) {
-    size_t n = 0;
-    unsigned char *raw = dec(cfg->keys[i].public_key, &n);
-    int valid_key = raw != NULL && n == 32;
-    free(raw);
+    hybrid *trusted = public_hybrid(cfg->keys[i].public_key);
+    int valid_key = trusted != NULL;
+    hybrid_free(trusted);
     if (!cfg->keys[i].id || !valid_key) {
       lb_client_destroy(c);
       return LB_INVALID_ARGUMENT;

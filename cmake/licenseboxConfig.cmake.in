@@ -1,6 +1,6 @@
 @PACKAGE_INIT@
 include(CMakeFindDependencyMacro)
-find_dependency(OpenSSL 3.0 COMPONENTS Crypto)
+find_dependency(OpenSSL 3.5 COMPONENTS Crypto)
 find_dependency(CURL 7.85)
 find_dependency(Threads)
 find_dependency(PkgConfig)
