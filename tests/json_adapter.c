@@ -62,6 +62,9 @@ int main(void) {
     for (size_t i = 0; i < 4; i++)
       json_object_object_add(options, fields[i],
                              json_object_get(get(o, fields[i])));
+    if (get(o, "enrol_token"))
+      json_object_object_add(options, "enrol_token",
+                             json_object_get(get(o, "enrol_token")));
     if (get(o, "ca_bundle"))
       json_object_object_add(options, "ca_bundle",
                              json_object_get(get(o, "ca_bundle")));
@@ -91,6 +94,15 @@ int main(void) {
                                json_object_new_string("café – test"));
       } else if (!strcmp(op, "sign_in"))
         json_object_object_add(args, "timeout", json_object_new_int(3));
+      else if (!strcmp(op, "enrol"))
+        json_object_object_add(args, "token", json_object_get(get(o, "token")));
+      else if (!strcmp(op, "checkout"))
+        json_object_object_add(args, "module", json_object_get(get(o, "module")));
+      else if (!strcmp(op, "checkin")) {
+        J *a = json_object_new_array();
+        json_object_array_add(a, json_object_get(get(o, "module")));
+        json_object_object_add(args, "modules", a);
+      }
       else if (!strcmp(op, "record")) {
         json_object_object_add(args, "command",
                                json_object_new_string("export"));

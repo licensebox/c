@@ -70,7 +70,7 @@ lb_result lb_client_create_json(const char *options, const lb_callbacks *cb,
       continue;
     if ((strcmp(key, "product") && strcmp(key, "version") &&
          strcmp(key, "server") && strcmp(key, "directory") &&
-         strcmp(key, "ca_bundle")) ||
+         strcmp(key, "ca_bundle") && strcmp(key, "enrol_token")) ||
         !str(value))
       valid = 0;
   }
@@ -81,7 +81,8 @@ lb_result lb_client_create_json(const char *options, const lb_callbacks *cb,
                      .key_count = n,
                      .version = str(get(o, "version")),
                      .server = str(get(o, "server")),
-                     .directory = str(get(o, "directory"))};
+                     .directory = str(get(o, "directory")),
+                     .enrol_token = str(get(o, "enrol_token"))};
     if (cb) {
       cfg.context = cb->context;
       cfg.on_sign_in = cb->on_sign_in;
@@ -181,6 +182,31 @@ lb_result lb_client_call_json(lb_client *c, const char *op,
             r = lb_request_access(c, names, n, note ? str(note) : "", out);
           free(names);
         }
+      }
+    }
+  } else if (!strcmp(op, "enrol") && str(get(o, "token")))
+    r = lb_enrol(c, str(get(o, "token")), out);
+  else if (!strcmp(op, "checkout") && str(get(o, "module")) &&
+           *str(get(o, "module")))
+    r = lb_checkout(c, str(get(o, "module")), out);
+  else if (!strcmp(op, "checkin")) {
+    J *a = get(o, "modules");
+    if (!a)
+      r = lb_checkin(c, NULL, 0);
+    else if (json_object_get_type(a) == json_type_array &&
+             json_object_array_length(a) <= 1024) {
+      size_t n = json_object_array_length(a);
+      const char **names = calloc(n ? n : 1, sizeof(*names));
+      if (!names)
+        r = LB_IO_ERROR;
+      else {
+        int valid = 1;
+        for (size_t i = 0; i < n; i++)
+          if (!(names[i] = str(json_object_array_get_idx(a, i))))
+            valid = 0;
+        if (valid)
+          r = lb_checkin(c, names, n);
+        free(names);
       }
     }
   } else if (!strcmp(op, "record")) {

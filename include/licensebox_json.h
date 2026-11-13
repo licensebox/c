@@ -5,7 +5,8 @@
 extern "C" {
 #endif
 /* Small FFI surface over the typed C API. JSON options contain product, keys
- * (id -> public key), version, server, directory and optional ca_bundle.
+ * (id -> public key), version, server, directory and optional ca_bundle and
+ * enrol_token.
  * Identity/clock
  * overrides are trusted callbacks, never JSON options or end-user input.
  * Borrowed callbacks/context must remain alive until lb_client_destroy. */
@@ -20,8 +21,9 @@ lb_result lb_client_create_json(const char *options_json, const lb_callbacks *,
                                 lb_client **output);
 /* Operations: lease, require {module}, heartbeat {module}, status, sign_in {timeout}, logout,
  * modules, requests, request {modules:[],note}, access-link,
- * record {command,success,elapsed}. Always returns caller-owned JSON on
- * success, including a JSON string for access-link and null for record/logout.
+ * record {command,success,elapsed}, enrol {token}, checkout {module},
+ * checkin {modules:[]}. Always returns caller-owned JSON on success,
+ * including a JSON string for access-link and null for record/logout/checkin.
  * Release output with lb_free. Serialize calls and reading errors together in
  * language bindings. Callbacks must not reenter the client. */
 lb_result lb_client_call_json(lb_client *, const char *operation,

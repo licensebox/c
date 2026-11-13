@@ -29,7 +29,9 @@ typedef enum {
   LB_PROTOCOL_ERROR,
   LB_NETWORK_ERROR,
   LB_CANCELLED,
-  LB_INVALID_ARGUMENT
+  LB_INVALID_ARGUMENT,
+  LB_NO_FREE_COPY,  /* every floating copy of the module is checked out */
+  LB_INVALID_TOKEN  /* the enrolment token is unknown, used or expired */
 } lb_result;
 typedef struct {
   const char *id;
@@ -49,6 +51,10 @@ typedef struct {
   /* Platform/test seam. Never supply a binding from an end user. */
   int (*machine_binding)(void *, char *output, size_t capacity);
   int (*cancelled)(void *);
+  /* A service account's one-time enrolment token; NULL reads the
+   * LICENSEBOX_ENROL_TOKEN environment variable. With one, activation enrols
+   * this machine without a person or a browser. */
+  const char *enrol_token;
 } lb_config;
 
 /* Client operations are serialized. Callbacks must not reenter the client.
@@ -82,6 +88,15 @@ lb_result lb_requests(lb_client *, char **requests_json);
 lb_result lb_access_link(lb_client *, char **url);
 lb_result lb_record(lb_client *, const char *command, int success,
                     double elapsed_seconds);
+/* Service accounts: enrol this machine with a one-time token an admin issued.
+ */
+lb_result lb_enrol(lb_client *, const char *token, char **lease_json);
+/* Floating copies. lb_require checks a floating module out by itself;
+ * LB_NO_FREE_COPY when every copy is in use. Keep a copy with heartbeats
+ * and return it with lb_checkin (count 0 returns every copy). Leases may
+ * name "elsewhere" (seats on other machines), "floating" and "checkouts". */
+lb_result lb_checkout(lb_client *, const char *module, char **lease_json);
+lb_result lb_checkin(lb_client *, const char *const *modules, size_t count);
 
 /* Stateless wire primitives; no private native identifier is logged or saved.
  */

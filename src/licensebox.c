@@ -27,7 +27,7 @@
 #define BINDING_CAP 128
 typedef struct json_object J;
 struct lb_client {
-  char *product, *version, *server, *directory, *ca_bundle;
+  char *product, *version, *server, *directory, *ca_bundle, *enrol_token;
   lb_public_key *keys;
   size_t key_count;
   lb_config callbacks;
@@ -61,9 +61,11 @@ static const char *codes[] = {"ok",
                               "protocol_error",
                               "network_error",
                               "cancelled",
-                              "invalid_argument"};
+                              "invalid_argument",
+                              "no_free_copy",
+                              "invalid_token"};
 const char *lb_result_code(lb_result r) {
-  return r >= LB_OK && r <= LB_INVALID_ARGUMENT ? codes[r] : "unknown_error";
+  return r >= LB_OK && r <= LB_INVALID_TOKEN ? codes[r] : "unknown_error";
 }
 const char *lb_error_code(const lb_client *c) {
   return c ? c->code : "invalid_argument";
@@ -577,6 +579,23 @@ static lb_result verify_internal(const char *token, const char *product,
       r = LB_MALFORMED;
       goto done;
     }
+  /* Optional lists: modules seated elsewhere, floating, checked out here. */
+  static const char *const lists[] = {"elsewhere", "floating", "checkouts"};
+  for (size_t l = 0; l < 3; l++) {
+    J *a = get(o, lists[l]);
+    if (!a)
+      continue;
+    if (!json_object_is_type(a, json_type_array)) {
+      r = LB_MALFORMED;
+      goto done;
+    }
+    for (size_t i = 0; i < json_object_array_length(a); i++)
+      if (!json_object_is_type(json_object_array_get_idx(a, i),
+                               json_type_string)) {
+        r = LB_MALFORMED;
+        goto done;
+      }
+  }
   double until = 0;
   if (!timestamp(field(o, "expires"), &until)) {
     r = LB_MALFORMED;
@@ -1021,7 +1040,11 @@ static lb_result post(lb_client *c, const char *path, J *request, long timeout,
     } else if (!strcmp(code, "revoked")) {
       forget(c);
       r = fail(c, LB_REVOKED, code, *detail ? detail : code);
-    } else
+    } else if (!strcmp(code, "no_free_copy"))
+      r = fail(c, LB_NO_FREE_COPY, code, *detail ? detail : code);
+    else if (!strcmp(code, "invalid_token"))
+      r = fail(c, LB_INVALID_TOKEN, code, *detail ? detail : code);
+    else
       r = fail(c, LB_HTTP_ERROR, code, *detail ? detail : code);
     json_object_put(answer);
     goto done;
@@ -1196,9 +1219,110 @@ static double monotonic(void) {
   clock_gettime(CLOCK_MONOTONIC, &t);
   return t.tv_sec + t.tv_nsec / 1e9;
 }
+static const char *enrol_token(lb_client *c) {
+  const char *t = c->enrol_token ? c->enrol_token : getenv("LICENSEBOX_ENROL_TOKEN");
+  while (t && isspace((unsigned char)*t))
+    t++;
+  return t && *t ? t : NULL;
+}
+/* Enrols this machine as a service account with a one-time token: the
+ * token's SHA-256 is signed with the key the lease will name. */
+static lb_result enrol(lb_client *c, const char *given, J **out) {
+  *out = NULL;
+  char *token = given ? strdup(given) : NULL;
+  if (given && !token)
+    return fail(c, LB_IO_ERROR, NULL, NULL);
+  size_t n = token ? strlen(token) : 0;
+  while (n && isspace((unsigned char)token[n - 1]))
+    token[--n] = 0;
+  const char *t = token;
+  while (t && isspace((unsigned char)*t))
+    t++;
+  if (!t || !*t) {
+    free(token);
+    return fail(c, LB_INVALID_TOKEN, NULL, "an enrolment token is required");
+  }
+  if (binding(c) != LB_OK) {
+    free(token);
+    return c->result;
+  }
+  char *old_token = read_state(c, "lease");
+  J *old = NULL;
+  verify_internal(old_token, c->product, c->keys, c->key_count, raw_now(c), 1,
+                  &old);
+  free(old_token);
+  int moved = old && strcmp(field(old, "binding"), c->binding);
+  json_object_put(old);
+  if (moved && rotate(c) != LB_OK) {
+    free(token);
+    return c->result;
+  }
+  hybrid *key = NULL;
+  lb_result r = install_key(c, &key);
+  if (r != LB_OK) {
+    free(token);
+    return r;
+  }
+  unsigned char sum[32];
+  char secret[65], at[40];
+  digest((const unsigned char *)t, strlen(t), sum);
+  hex(sum, 32, secret);
+  stamp(raw_now(c), at);
+  char *message = format("licensebox enrol v3\n" ALGORITHM "\n%s\n%s\n%s\n%s",
+                         c->product, secret, c->binding, at),
+       *sig = signature(key, message), *public = public_key(key);
+  free(message);
+  hybrid_free(key);
+  if (!sig || !public) {
+    free(sig);
+    free(public);
+    free(token);
+    return fail(c, LB_IO_ERROR, NULL, NULL);
+  }
+  struct utsname host;
+  uname(&host);
+  const char *architecture = !strcmp(host.machine, "x86_64")    ? "amd64"
+                             : !strcmp(host.machine, "aarch64") ? "arm64"
+                                                                : host.machine;
+  J *request = json_object_new_object(), *response = NULL;
+  add(request, "product", c->product);
+  add(request, "token", t);
+  add(request, "binding", c->binding);
+  add(request, "machine", public);
+  add(request, "os", "linux");
+  add(request, "arch", architecture);
+  add(request, "version", c->version);
+  add(request, "time", at);
+  add(request, "signature", sig);
+  free(sig);
+  free(public);
+  free(token);
+  r = post(c, "/v1/enrol", request, 20000, &response);
+  json_object_put(request);
+  if (r != LB_OK) {
+    if (!strcmp(c->code, "access_denied"))
+      r = fail(c, LB_DENIED, NULL, NULL);
+    return r;
+  }
+  r = save(c, field(response, "lease"), out);
+  if (r == LB_OK)
+    r = usage_sent(c, NULL, json_object_get_boolean(get(response, "usage")));
+  json_object_put(response);
+  if (r != LB_OK) {
+    json_object_put(*out);
+    *out = NULL;
+    return r;
+  }
+  json_object_put(c->checked);
+  c->checked = json_object_get(*out);
+  return LB_OK;
+}
 static lb_result activate(lb_client *c, int explicit, double timeout,
                           int rotated, J **out) {
   *out = NULL;
+  const char *token = enrol_token(c);
+  if (token)
+    return enrol(c, token, out);
   if (binding(c) != LB_OK)
     return c->result;
   char *old_token = read_state(c, "lease");
@@ -1426,12 +1550,56 @@ static void reset(lb_client *c) {
   c->status = 0;
   fail(c, LB_OK, NULL, NULL);
 }
-static int has_module(J *lease, const char *module) {
-  J *a = get(lease, "modules");
+static int listed(J *lease, const char *list, const char *module) {
+  J *a = get(lease, list);
+  if (!json_object_is_type(a, json_type_array))
+    return 0;
   for (size_t i = 0; i < json_object_array_length(a); i++)
     if (!strcmp(str(json_object_array_get_idx(a, i)), module))
       return 1;
   return 0;
+}
+/* The lease lets its holder run the module: one of its modules, or a
+ * floating copy this machine has checked out. */
+static int has_module(J *lease, const char *module) {
+  return listed(lease, "modules", module) || listed(lease, "checkouts", module);
+}
+static lb_result module_denied(lb_client *c, J *lease, const char *module) {
+  return fail(c, LB_MODULE_DENIED, NULL,
+              listed(lease, "elsewhere", module)
+                  ? "the seat of the module is on another machine; explicitly "
+                    "sign in to move it here"
+                  : "the requested module is not licensed to this user");
+}
+/* A signed call answered by a fresh lease, which is kept. */
+static lb_result lease_call(lb_client *c, const char *kind, J *payload,
+                            J **out) {
+  *out = NULL;
+  J *response = NULL;
+  lb_result r = call(c, kind, payload, 20000, &response);
+  if (r == LB_OK)
+    r = save(c, field(response, "lease"), out);
+  json_object_put(response);
+  if (r == LB_OK) {
+    json_object_put(c->checked);
+    c->checked = json_object_get(*out);
+  }
+  return r;
+}
+static lb_result take_copy(lb_client *c, const char *module, J **out) {
+  J *payload = json_object_new_object();
+  add(payload, "module", module);
+  lb_result r = lease_call(c, "checkout", payload, out);
+  json_object_put(payload);
+  if (r != LB_OK && !strcmp(c->code, "not_floating"))
+    return fail(c, LB_MODULE_DENIED, NULL,
+                "no floating copies of the module are this user's to check out");
+  if (r == LB_OK && !has_module(*out, module)) {
+    r = module_denied(c, *out, module);
+    json_object_put(*out);
+    *out = NULL;
+  }
+  return r;
 }
 lb_result lb_client_create(const lb_config *cfg, lb_client **out) {
   if (!out)
@@ -1506,6 +1674,11 @@ lb_result lb_client_create(const lb_config *cfg, lb_client **out) {
       return LB_IO_ERROR;
     }
   }
+  if (cfg->enrol_token && !(c->enrol_token = strdup(cfg->enrol_token))) {
+    lb_client_destroy(c);
+    return LB_IO_ERROR;
+  }
+  c->callbacks.enrol_token = NULL;
   if (cfg->directory)
     c->directory = strdup(cfg->directory);
   else {
@@ -1540,6 +1713,7 @@ void lb_client_destroy(lb_client *c) {
   free(c->server);
   free(c->directory);
   free(c->ca_bundle);
+  free(c->enrol_token);
   pthread_mutex_destroy(&c->mutex);
   free(c);
 }
@@ -1592,9 +1766,14 @@ lb_result lb_require(lb_client *c, const char *module, char **out) {
                (checked != LB_NETWORK_ERROR && c->status < 500))
       r = checked;
   }
+  if (r == LB_OK && !has_module(o, module) && listed(o, "floating", module)) {
+    J *taken = NULL;
+    r = take_copy(c, module, &taken);
+    json_object_put(o);
+    o = taken;
+  }
   if (r == LB_OK && !has_module(o, module))
-    r = fail(c, LB_MODULE_DENIED, NULL,
-             "the requested module is not licensed to this user");
+    r = module_denied(c, o, module);
   if (r == LB_OK)
     r = output_json(c, o, out);
   json_object_put(o);
@@ -1667,9 +1846,19 @@ lb_result lb_heartbeat(lb_client *c, const char *module, char **out) {
     reset(c);
     r = LB_OK;
   }
+  if (online && !has_module(fresh, module) && listed(fresh, "floating", module) &&
+      listed(kept, "checkouts", module)) {
+    /* The copy lapsed, as after a gap longer than the grace, or an admin
+     * freed it: it is taken again if one is free. */
+    J *taken = NULL;
+    r = take_copy(c, module, &taken);
+    if (r != LB_OK)
+      goto done;
+    json_object_put(fresh);
+    fresh = taken;
+  }
   if (!has_module(fresh, module)) {
-    r = fail(c, LB_MODULE_DENIED, NULL,
-             "the requested module is not licensed to this user");
+    r = module_denied(c, fresh, module);
     goto done;
   }
   result = json_object_new_object();
@@ -1806,6 +1995,66 @@ lb_result lb_request_access(lb_client *c, const char *const *modules,
   add(p, "note", note);
   lb_result r = signed_operation(c, "request", p, 0, out);
   json_object_put(p);
+  return r;
+}
+lb_result lb_enrol(lb_client *c, const char *token, char **out) {
+  if (!c || !out || !token)
+    return LB_INVALID_ARGUMENT;
+  *out = NULL;
+  pthread_mutex_lock(&c->mutex);
+  reset(c);
+  J *o = NULL;
+  lb_result r = enrol(c, token, &o);
+  if (r == LB_OK)
+    r = output_json(c, o, out);
+  json_object_put(o);
+  pthread_mutex_unlock(&c->mutex);
+  return r;
+}
+lb_result lb_checkout(lb_client *c, const char *module, char **out) {
+  if (!c || !out || !module || !*module)
+    return LB_INVALID_ARGUMENT;
+  *out = NULL;
+  pthread_mutex_lock(&c->mutex);
+  reset(c);
+  J *o = NULL;
+  lb_result r = get_lease(c, &o);
+  json_object_put(o);
+  o = NULL;
+  if (r == LB_OK)
+    r = take_copy(c, module, &o);
+  if (r == LB_OK)
+    r = output_json(c, o, out);
+  json_object_put(o);
+  pthread_mutex_unlock(&c->mutex);
+  return r;
+}
+lb_result lb_checkin(lb_client *c, const char *const *modules, size_t count) {
+  if (!c || (count && !modules) || count > 1024)
+    return LB_INVALID_ARGUMENT;
+  J *payload = json_object_new_object(), *a = json_object_new_array();
+  for (size_t i = 0; i < count; i++) {
+    if (!modules[i]) {
+      json_object_put(payload);
+      json_object_put(a);
+      return LB_INVALID_ARGUMENT;
+    }
+    json_object_array_add(a, json_object_new_string(modules[i]));
+  }
+  json_object_object_add(payload, "modules", a);
+  pthread_mutex_lock(&c->mutex);
+  reset(c);
+  J *o = NULL;
+  lb_result r = LB_OK;
+  char *token = read_state(c, "lease");
+  if (!token || !*token)
+    r = fail(c, LB_NOT_SIGNED_IN, NULL, NULL);
+  free(token);
+  if (r == LB_OK)
+    r = lease_call(c, "checkin", payload, &o);
+  json_object_put(o);
+  json_object_put(payload);
+  pthread_mutex_unlock(&c->mutex);
   return r;
 }
 lb_result lb_record(lb_client *c, const char *command, int success,

@@ -118,3 +118,26 @@ at the last verified expiry even if renewal is slow. No failed check may move
 that deadline. This SDK starts no worker thread and never exits the application;
 callbacks retain their existing thread and non-reentry requirements. The JSON
 ABI exposes `heartbeat` with `{"module":"export"}` and the same result/lifetime.
+
+## Seats per module, floating copies and service accounts
+
+A module can have seats of its own. It is in a machine's lease only while that
+machine holds one of its seats; elsewhere the lease names it in `elsewhere`,
+and `lb_require` returns `LB_MODULE_DENIED` with a message saying an explicit
+`lb_sign_in` moves the seat here.
+
+A customer can hold a pool of floating copies of a module; the lease names
+such modules in `floating`. `lb_require` checks a copy out when the module is
+not held outright, and returns `LB_NO_FREE_COPY` when every copy is in use.
+Keep the copy with `lb_heartbeat` while the work runs, and return it with
+`lb_checkin`. `lb_checkout` takes a copy explicitly. A copy lives only as long
+as the lease, so a crashed application frees its copy when the heartbeat grace
+passes; a heartbeat takes a lapsed copy again if one is free.
+
+A server or build runner can be licensed as a service account. Set the
+one-time token an admin issued as `LICENSEBOX_ENROL_TOKEN`, or as
+`lb_config.enrol_token` (`enrol_token` in the JSON options): the first
+`lb_require`, `lb_lease` or `lb_sign_in` enrols the machine without a
+browser. `lb_enrol` does it explicitly. A used or expired token returns
+`LB_INVALID_TOKEN`. JSON bindings call `enrol {token}`, `checkout {module}`
+and `checkin {modules}`.

@@ -72,7 +72,8 @@ int main(void) {
                      .context = o,
                      .clock = clock_fn,
                      .on_sign_in = signin,
-                     .machine_binding = get(o, "binding") ? binding_fn : NULL};
+                     .machine_binding = get(o, "binding") ? binding_fn : NULL,
+                     .enrol_token = get(o, "enrol_token") ? s(o, "enrol_token") : NULL};
     r = lb_client_create(&cfg, &client);
     if (r == LB_OK) {
       if (!strcmp(op, "lease"))
@@ -114,6 +115,13 @@ int main(void) {
       } else if (!strcmp(op, "request")) {
         const char *modules[] = {"export"};
         r = lb_request_access(client, modules, 1, "café – test", &output);
+      } else if (!strcmp(op, "enrol"))
+        r = lb_enrol(client, s(o, "token"), &output);
+      else if (!strcmp(op, "checkout"))
+        r = lb_checkout(client, s(o, "module"), &output);
+      else if (!strcmp(op, "checkin")) {
+        const char *modules[] = {s(o, "module")};
+        r = lb_checkin(client, modules, 1);
       } else if (!strcmp(op, "record")) {
         r = lb_record(client, "export", 1, .125);
         if (r == LB_OK)
