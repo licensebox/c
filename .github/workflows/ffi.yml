@@ -15,7 +15,7 @@ jobs:
       - uses: actions/checkout@v4
         with:
           repository: licensebox/protocol
-          ref: e45a2160a0ebf7277c06bd51369d00a02232a4ad
+          ref: 8d9b2b91d271923e08d9cc605e61329ee44ab15b
           path: .protocol
           persist-credentials: false
       - uses: actions/setup-python@v5
